@@ -40,15 +40,24 @@ Both client and server use a `config.json` file.
 
 ```json
 {
-  "addresses": ["127.0.0.1"],  // Server addresses for the client to connect to
-  "host": "localhost",       // Host header / SNI
+  "addresses": [
+    "1.1.1.1", 
+    "2.2.2.0/24", 
+    "3.3.3.3-4.4.4.4"
+  ],                         // Server addresses (supports IP, CIDR, and Ranges)
+  "host": "your-cdn-host.com", // Host header / SNI
   "tls": false,              // Enable TLS
-  "sni": "localhost",        // Server Name Indication (if TLS is true)
-  "port": 8080,              // Server listening port (for server)
+  "sni": "your-cdn-host.com", // Server Name Indication (if TLS is true)
+  "port": 80,                // Server listening port
   "proxy_port": 1080,        // Local SOCKS5 port (for client)
   "secret": "my-secret-key"  // Shared secret for authentication
 }
 ```
+
+> [!IMPORTANT]
+> **CDN & Cloudflare Configuration:**
+> - The connection between the **CDN** and your **Server** must be over **HTTP** (not HTTPS).
+> - If you are using **Cloudflare**, you must set the SSL/TLS encryption mode to **Flexible**.
 
 ## Usage
 
