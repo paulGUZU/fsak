@@ -84,3 +84,6 @@ Both client and server use a `config.json` file.
 ## License
 
 MIT
+
+
+## زنده باد ایران - به امید آزادی 
