@@ -1,0 +1,9 @@
+{
+  "addressess": ["127.0.0.1"],
+  "host": "localhost",
+  "tls": false,
+  "sni": "localhost",
+  "port": 8080,
+  "proxy_port": 1080,
+  "secret": "my-extremely-secure-secret-key-1234"
+}
