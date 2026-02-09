@@ -5,6 +5,7 @@ import (
 	"log"
 	
 	"github.com/paulGUZU/fsak/internal/client"
+	"github.com/paulGUZU/fsak/pkg/banner"
 	"github.com/paulGUZU/fsak/pkg/config"
 )
 
@@ -18,7 +19,7 @@ func main() {
 	}
 
 	// Initialize Address Pool
-	pool, err := client.NewAddressPool(cfg.Addresses)
+	pool, err := client.NewAddressPool(cfg.Addresses, cfg.Port)
 	if err != nil {
 		log.Fatalf("Failed to init address pool: %v", err)
 	}
@@ -28,6 +29,10 @@ func main() {
 
 	// Initialize SOCKS5 Server
 	socks := client.NewSOCKS5Server(cfg.ProxyPort, transport)
+
+	// Banner
+	banner.Print("CLIENT")
+	banner.PrintClientStatus(cfg.ProxyPort, cfg.Host, cfg.TLS)
 
 	// Start
 	log.Printf("Starting SOCKS5 Client on port %d...", cfg.ProxyPort)

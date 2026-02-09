@@ -38,7 +38,7 @@ func NewTransport(cfg *config.Config, pool *AddressPool) *Transport {
 }
 
 func (t *Transport) Tunnel(target string, clientConn net.Conn) error {
-	serverIP := t.Pool.PickInfo()
+	serverIP := t.Pool.PickBest()
 	sessionID := uuid.New().String()
 	
 	destURL := fmt.Sprintf("%s://%s:%d", t.scheme(), serverIP, t.Config.Port)

@@ -1,5 +1,7 @@
 # FSAK - Fast Secure Awesome Kokh
 
+[Persian (فارسی)](README_fa.md)
+
 FSAK is a high-performance, secure SOCKS5 proxy server and client written in Go. It allows you to tunnel traffic securely between a client and a server, bypassing restrictions and ensuring privacy.
 
 ## Features
@@ -70,6 +72,8 @@ Both client and server use a `config.json` file.
 ./bin/fsak-server -config config.json
 ```
 
+![Server Screenshot](resource/img/server.png)
+
 ### Running the Client
 
 1.  Create a `config.json` with the server's address, the shared secret, and your desired local SOCKS5 port.
@@ -78,6 +82,8 @@ Both client and server use a `config.json` file.
 ```bash
 ./bin/fsak-client -config config.json
 ```
+
+![Client Screenshot](resource/img/client.png)
 
 3.  Configure your browser or application to use the SOCKS5 proxy at `127.0.0.1:1080` (or whatever `proxy_port` you configured).
 
