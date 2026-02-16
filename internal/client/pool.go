@@ -1,107 +1,100 @@
 package client
 
 import (
+	"bufio"
+	"crypto/tls"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 type IPStats struct {
-	IP        string
-	Latency   time.Duration
-	LastCheck time.Time
-	Fails     int
-	Healthy   bool
+	IP          string
+	Latency     time.Duration
+	TCPLatency  time.Duration
+	AppLatency  time.Duration
+	Quality     float64
+	LastCheck   time.Time
+	Fails       int
+	Healthy     bool
+	Successes   int
+	LastRuntime time.Time
 }
 
 type AddressPool struct {
-	configAddrs []string // Original config entries (IPs or CIDRs)
-	targetPort  int      // Server port to check
+	configAddrs []string
+	targetPort  int
+	targetHost  string
+	targetTLS   bool
 
-	candidates map[string]*IPStats // Active working set of IPs
-	sortedIPs  []string            // IPs sorted by latency (fastest first)
+	candidates map[string]*IPStats
+	sortedIPs  []string
 
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
-func NewAddressPool(addrs []string, port int) (*AddressPool, error) {
+func NewAddressPool(addrs []string, port int, host string, tlsEnabled bool) (*AddressPool, error) {
 	pool := &AddressPool{
 		configAddrs: addrs,
 		targetPort:  port,
+		targetHost:  strings.TrimSpace(host),
+		targetTLS:   tlsEnabled,
 		candidates:  make(map[string]*IPStats),
+		stopCh:      make(chan struct{}),
 	}
 
-	// Initial population
 	pool.refreshCandidates()
-
-	// Start background checker
 	go pool.checkLoop()
-
 	return pool, nil
 }
 
-// refreshCandidates ensures we have enough candidates.
-// It parses CIDRs and picks random IPs if needed.
 func (p *AddressPool) refreshCandidates() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// If we already have enough healthy candidates, maybe we don't need to add more?
-	// But we should always ensure we have a mix if the list is small.
-	// For now, let's just re-scan configAddrs and ensure we have some base set.
-
-	// Limit total candidates to avoid memory explosion
 	const maxCandidates = 1000
-
 	if len(p.candidates) >= maxCandidates {
 		return
 	}
 
 	for _, addr := range p.configAddrs {
-		if ip, ipnet, err := net.ParseCIDR(addr); err == nil {
-			// It's a CIDR
-			// Add a few random IPs from this CIDR
-			// If it's a small CIDR/Subnet, maybe add all?
-			// For MVP, just add 5 random ones each refresh cycle up to limit
-			for i := 0; i < 5; i++ {
+		if _, ipnet, err := net.ParseCIDR(addr); err == nil {
+			for i := 0; i < 5 && len(p.candidates) < maxCandidates; i++ {
 				newIP := randomIPInSubnet(ipnet)
 				ipStr := newIP.String()
 				if _, exists := p.candidates[ipStr]; !exists {
-					p.candidates[ipStr] = &IPStats{
-						IP: ipStr,
-					}
+					p.candidates[ipStr] = &IPStats{IP: ipStr}
 				}
 			}
-			// Always ensure the base IP (if meaningful) or just randoms?
-			// net.ParseCIDR returns the IP part too.
-			if ip != nil {
-				// Often the IP part of a CIDR string is the network address, which might not be a valid host.
-				// But sometimes it is "1.2.3.4/24".
-				// Let's ignore the base IP unless it's a /32, which falls into the else block usually?
-				// Actually ParseCIDR("1.2.3.4/32") works.
-			}
+			continue
+		}
 
-		} else {
-			// Assume it's a single IP or Hostname
-			if _, exists := p.candidates[addr]; !exists {
-				p.candidates[addr] = &IPStats{
-					IP: addr,
-				}
-			}
+		if _, exists := p.candidates[addr]; !exists && len(p.candidates) < maxCandidates {
+			p.candidates[addr] = &IPStats{IP: addr}
 		}
 	}
 }
 
 func (p *AddressPool) checkLoop() {
-	ticker := time.NewTicker(10 * time.Second) // Check every 10s
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
 	for {
-		// 1. Refresh candidates (add new ones if needed)
+		select {
+		case <-p.stopCh:
+			return
+		default:
+		}
+
 		p.refreshCandidates()
 
-		// 2. Snapshot candidates for checking to avoid holding lock during network ops
 		p.mu.RLock()
 		checkList := make([]string, 0, len(p.candidates))
 		for ip := range p.candidates {
@@ -109,17 +102,17 @@ func (p *AddressPool) checkLoop() {
 		}
 		p.mu.RUnlock()
 
-		// 3. Check each candidate
 		type result struct {
 			IP      string
-			Latency time.Duration
+			TCP     time.Duration
+			App     time.Duration
+			Quality float64
 			Alive   bool
 		}
+
 		results := make(chan result, len(checkList))
 		var wg sync.WaitGroup
-
-		// Limit concurrency
-		sem := make(chan struct{}, 50) // Max 50 concurrent checks
+		sem := make(chan struct{}, 40)
 
 		for _, ip := range checkList {
 			wg.Add(1)
@@ -128,20 +121,23 @@ func (p *AddressPool) checkLoop() {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				start := time.Now()
-				alive := isHealthy(target, p.targetPort)
-				latency := time.Since(start)
-
-				results <- result{IP: target, Latency: latency, Alive: alive}
+				tcpLatency, appLatency, ok := probeEndpointQuality(target, p.targetPort, p.targetHost, p.targetTLS)
+				q := qualityScore(tcpLatency, appLatency, ok, 0)
+				results <- result{
+					IP:      target,
+					TCP:     tcpLatency,
+					App:     appLatency,
+					Quality: q,
+					Alive:   ok,
+				}
 			}(ip)
 		}
 
 		wg.Wait()
 		close(results)
 
-		// 4. Update stats and sort
 		p.mu.Lock()
-		var active []string
+		active := make([]string, 0, len(checkList))
 
 		for res := range results {
 			stats, exists := p.candidates[res.IP]
@@ -149,106 +145,207 @@ func (p *AddressPool) checkLoop() {
 				continue
 			}
 
+			stats.LastCheck = time.Now()
 			if res.Alive {
 				stats.Healthy = true
-				stats.Latency = res.Latency
-				stats.LastCheck = time.Now()
+				stats.TCPLatency = res.TCP
+				stats.AppLatency = res.App
+				stats.Latency = res.TCP + res.App
 				stats.Fails = 0
+				stats.Quality = res.Quality
 				active = append(active, res.IP)
-			} else {
-				stats.Healthy = false
-				stats.Fails++
-				// Remove if too many fails?
-				if stats.Fails > 3 {
-					delete(p.candidates, res.IP)
-				}
+				continue
+			}
+
+			stats.Healthy = false
+			stats.Fails++
+			stats.Quality = qualityScore(res.TCP, res.App, false, stats.Fails)
+			if stats.Fails > 3 {
+				delete(p.candidates, res.IP)
 			}
 		}
 
-		// Sort active IPs by latency
 		sort.Slice(active, func(i, j int) bool {
-			return p.candidates[active[i]].Latency < p.candidates[active[j]].Latency
+			a := p.candidates[active[i]]
+			b := p.candidates[active[j]]
+			if a.Quality == b.Quality {
+				return a.Latency < b.Latency
+			}
+			return a.Quality < b.Quality
 		})
 		p.sortedIPs = active
+
+		if len(active) > 0 {
+			best := p.candidates[active[0]]
+			fmt.Printf("\r\033[K[%s] Active IPs: %d | Best: %s (tcp=%v app=%v)",
+				time.Now().Format("15:04:05"),
+				len(active),
+				best.IP,
+				best.TCPLatency,
+				best.AppLatency,
+			)
+		} else {
+			fmt.Printf("\r\033[K[%s] Warning: No quality-healthy IPs available.", time.Now().Format("15:04:05"))
+		}
 		p.mu.Unlock()
 
-
-		// Log status occasionally
-		if len(active) > 0 {
-			bestIP := active[0]
-			bestLatency := p.candidates[bestIP].Latency
-			fmt.Printf("\r\033[K[%s] Active IPs: %d | Best: %s (%v)", 
-				time.Now().Format("15:04:05"), 
-				len(active), 
-				bestIP, 
-				bestLatency)
-		} else {
-			fmt.Printf("\r\033[K[%s] Warning: No healthy IPs available.", time.Now().Format("15:04:05"))
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
 		}
-
-		<-ticker.C
 	}
 }
 
-// PickBest returns one of the best available IPs.
+func qualityScore(tcpLatency, appLatency time.Duration, ok bool, fails int) float64 {
+	base := float64((tcpLatency + appLatency).Microseconds())
+	if base == 0 {
+		base = float64((3 * time.Second).Microseconds())
+	}
+	if !ok {
+		base += float64((2 * time.Second).Microseconds())
+	}
+	if fails > 0 {
+		base += float64(fails) * float64((250 * time.Millisecond).Microseconds())
+	}
+	return base
+}
+
+func probeEndpointQuality(ip string, port int, host string, tlsEnabled bool) (tcpLatency, appLatency time.Duration, ok bool) {
+	timeout := 2 * time.Second
+	address := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
+
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", address, timeout)
+	if err != nil {
+		return 0, 0, false
+	}
+	tcpLatency = time.Since(start)
+	defer conn.Close()
+
+	probeConn := conn
+	if tlsEnabled {
+		serverName := strings.TrimSpace(host)
+		if serverName == "" {
+			serverName = ip
+		}
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: serverName == ip,
+		})
+		_ = tlsConn.SetDeadline(time.Now().Add(timeout))
+		if err := tlsConn.Handshake(); err != nil {
+			return tcpLatency, 0, false
+		}
+		probeConn = tlsConn
+	}
+
+	reqHost := strings.TrimSpace(host)
+	if reqHost == "" {
+		reqHost = ip
+	}
+	_ = probeConn.SetDeadline(time.Now().Add(timeout))
+	startApp := time.Now()
+	_, err = fmt.Fprintf(probeConn, "HEAD /download?session_id=quality HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", reqHost)
+	if err != nil {
+		return tcpLatency, 0, false
+	}
+
+	reader := bufio.NewReader(probeConn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return tcpLatency, 0, false
+	}
+	if !strings.HasPrefix(line, "HTTP/") {
+		return tcpLatency, 0, false
+	}
+
+	appLatency = time.Since(startApp)
+	return tcpLatency, appLatency, true
+}
+
+func (p *AddressPool) Stop() {
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+	})
+}
+
 func (p *AddressPool) PickBest() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if len(p.sortedIPs) == 0 {
-		// Fallback: Pick a random one from config or candidates?
-		// If we have candidates (even if unchecked/unhealthy), try one?
 		if len(p.candidates) > 0 {
-			// iterate map to get a random one
 			for ip := range p.candidates {
 				return ip
 			}
 		}
-		// Last resort
 		if len(p.configAddrs) > 0 {
-			// Just return the first config addr (stripping CIDR if needed, but for now just raw)
 			return p.configAddrs[0]
 		}
 		return "127.0.0.1"
 	}
 
-	// Load balancing: Pick randomly from top 3 (or fewer if not enough)
 	topN := 3
 	if len(p.sortedIPs) < topN {
 		topN = len(p.sortedIPs)
 	}
-
-	idx := rand.Intn(topN)
-	return p.sortedIPs[idx]
+	return p.sortedIPs[rand.Intn(topN)]
 }
 
-func isHealthy(ip string, port int) bool {
-	timeout := 2 * time.Second
-	address := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
-	conn, err := net.DialTimeout("tcp", address, timeout)
-	if err != nil {
-		return false
+func (p *AddressPool) ReportRuntimeResult(ip string, success bool, latency time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	stats, ok := p.candidates[ip]
+	if !ok {
+		return
 	}
-	conn.Close()
-	return true
+	stats.LastRuntime = time.Now()
+	if success {
+		stats.Successes++
+		if stats.Fails > 0 {
+			stats.Fails--
+		}
+		if latency > 0 {
+			if stats.AppLatency == 0 {
+				stats.AppLatency = latency
+			} else {
+				stats.AppLatency = ewmaDuration(stats.AppLatency, latency, 0.2)
+			}
+			stats.Latency = stats.TCPLatency + stats.AppLatency
+		}
+		stats.Healthy = true
+		stats.Quality = qualityScore(stats.TCPLatency, stats.AppLatency, true, stats.Fails)
+		return
+	}
+
+	stats.Fails++
+	stats.Healthy = false
+	stats.Quality = qualityScore(stats.TCPLatency, stats.AppLatency, false, stats.Fails)
+}
+
+func ewmaDuration(prev, curr time.Duration, alpha float64) time.Duration {
+	if prev <= 0 {
+		return curr
+	}
+	p := float64(prev)
+	c := float64(curr)
+	v := alpha*c + (1-alpha)*p
+	return time.Duration(math.Round(v))
 }
 
 func randomIPInSubnet(n *net.IPNet) net.IP {
 	ip := make(net.IP, len(n.IP))
 	copy(ip, n.IP)
 
-	// Calculate mask
 	_, bits := n.Mask.Size()
-	if bits == 32 { // IPv4
-		// Create random bytes
+	if bits == 32 {
 		randBytes := make([]byte, 4)
-		rand.Read(randBytes) // global math/rand
-
-		// Result = (IP & Mask) | (Random & ^Mask)
+		rand.Read(randBytes)
 		for i := 0; i < len(ip); i++ {
 			ip[i] = (ip[i] & n.Mask[i]) | (randBytes[i] & ^n.Mask[i])
 		}
 	}
-	// TODO: IPv6 support (bits == 128)
 	return ip
 }

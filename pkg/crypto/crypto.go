@@ -9,10 +9,14 @@ import (
 	"io"
 )
 
+func DeriveKey(secret string) [32]byte {
+	return sha256.Sum256([]byte(secret))
+}
+
 // NewCipher creates a generic block cipher from the secret.
 // We use SHA-256 to hash the secret into a 32-byte key for AES-256.
 func NewGCM(secret string) (cipher.AEAD, error) {
-	key := sha256.Sum256([]byte(secret))
+	key := DeriveKey(secret)
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, err
@@ -84,7 +88,11 @@ type CryptoWriter struct {
 }
 
 func NewCryptoWriter(w io.Writer, secret string, iv []byte) (*CryptoWriter, error) {
-	key := sha256.Sum256([]byte(secret))
+	key := DeriveKey(secret)
+	return NewCryptoWriterWithKey(w, key, iv)
+}
+
+func NewCryptoWriterWithKey(w io.Writer, key [32]byte, iv []byte) (*CryptoWriter, error) {
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, err
@@ -111,8 +119,12 @@ type CryptoReader struct {
 }
 
 func NewCryptoReader(r io.Reader, secret string, iv []byte) (*CryptoReader, error) {
+	key := DeriveKey(secret)
+	return NewCryptoReaderWithKey(r, key, iv)
+}
+
+func NewCryptoReaderWithKey(r io.Reader, key [32]byte, iv []byte) (*CryptoReader, error) {
 	// CTR mode is symmetric for encryption/decryption
-	key := sha256.Sum256([]byte(secret))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, err
@@ -132,4 +144,16 @@ func (cr *CryptoReader) Read(p []byte) (n int, err error) {
 		cr.stream.XORKeyStream(p[:n], p[:n])
 	}
 	return n, err
+}
+
+func XORCTRInPlace(key [32]byte, iv []byte, data []byte) error {
+	if len(iv) != aes.BlockSize {
+		return fmt.Errorf("iv length must be %d", aes.BlockSize)
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return err
+	}
+	cipher.NewCTR(block, iv).XORKeyStream(data, data)
+	return nil
 }

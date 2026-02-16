@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"log"
-	
+
 	"github.com/paulGUZU/fsak/internal/client"
 	"github.com/paulGUZU/fsak/pkg/banner"
 	"github.com/paulGUZU/fsak/pkg/config"
@@ -19,7 +19,7 @@ func main() {
 	}
 
 	// Initialize Address Pool
-	pool, err := client.NewAddressPool(cfg.Addresses, cfg.Port)
+	pool, err := client.NewAddressPool(cfg.Addresses, cfg.Port, cfg.Host, cfg.TLS)
 	if err != nil {
 		log.Fatalf("Failed to init address pool: %v", err)
 	}

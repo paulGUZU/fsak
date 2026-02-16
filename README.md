@@ -11,6 +11,7 @@ FSAK is a high-performance, secure SOCKS5 proxy server and client written in Go.
 - **Secure Transport**: potentially supports TLS (configuration dependent).
 - **Easy Configuration**: JSON-based configuration.
 - **Cross-Platform**: Runs on Linux, Windows, and macOS.
+- **Client GUI**: Profile-based local control panel with start/stop actions.
 
 ## Installation
 
@@ -32,6 +33,9 @@ go build -o bin/fsak-client ./cmd/client
 
 # Build Server
 go build -o bin/fsak-server ./cmd/server
+
+# Build Desktop GUI
+go build -o bin/fsak-gui ./cmd/gui
 ```
 
 ## Configuration
@@ -86,6 +90,42 @@ Both client and server use a `config.json` file.
 ![Client Screenshot](resource/img/client.png)
 
 3.  Configure your browser or application to use the SOCKS5 proxy at `127.0.0.1:1080` (or whatever `proxy_port` you configured).
+
+### Running the Desktop GUI
+
+The GUI is a native desktop app (single executable) for Linux, macOS, and Windows.
+
+```bash
+./bin/fsak-gui
+```
+
+Profiles are stored locally in your OS config directory:
+- macOS: `~/Library/Application Support/fsak/client_profiles.json`
+- Linux: `~/.config/fsak/client_profiles.json`
+- Windows: `%AppData%\fsak\client_profiles.json`
+
+GUI features:
+- Edit all client configuration fields
+- Save and load multiple local profiles
+- Start and stop the client runtime from the interface
+
+### Build Native `.exe` / macOS App Bundle
+
+Windows executable:
+```bash
+GOOS=windows GOARCH=amd64 go build -o dist/fsak-gui.exe ./cmd/gui
+```
+
+Linux executable:
+```bash
+GOOS=linux GOARCH=amd64 go build -o dist/fsak-gui-linux-amd64 ./cmd/gui
+```
+
+macOS app bundle / package (requires `fyne` CLI):
+```bash
+go install fyne.io/tools/cmd/fyne@latest
+fyne package -os darwin -name FSAK-GUI -appID com.paulguzu.fsak.gui
+```
 
 ## License
 

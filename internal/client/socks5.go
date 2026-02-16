@@ -1,16 +1,18 @@
 package client
 
 import (
+	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"encoding/binary"
+	"sync"
 )
 
 // SOCKS5 Constants
 const (
-	verSocks5 = 0x05
+	verSocks5  = 0x05
 	cmdConnect = 0x01
 	atypIPv4   = 0x01
 	atypDomain = 0x03
@@ -18,35 +20,163 @@ const (
 )
 
 type SOCKS5Server struct {
-	addr string
+	addr      string
 	transport *Transport
+	mu        sync.Mutex
+	listener  net.Listener
+	conns     map[net.Conn]struct{}
+	done      chan struct{}
+	serveErr  chan error
+	wg        sync.WaitGroup
 }
 
 func NewSOCKS5Server(port int, t *Transport) *SOCKS5Server {
 	return &SOCKS5Server{
-		addr: fmt.Sprintf(":%d", port),
+		addr:      fmt.Sprintf(":%d", port),
 		transport: t,
+		conns:     make(map[net.Conn]struct{}),
 	}
 }
 
-func (s *SOCKS5Server) ListenAndServe() error {
+func (s *SOCKS5Server) Start() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.listener != nil {
+		return fmt.Errorf("SOCKS5 server already running")
+	}
+
 	l, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return err
 	}
-	log.Printf("SOCKS5 Proxy listening on %s", s.addr)
+	s.listener = l
+	s.done = make(chan struct{})
+	s.serveErr = make(chan error, 1)
 
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			log.Printf("Accept failed: %v", err)
-			continue
-		}
-		go s.handleConnection(conn)
+	log.Printf("SOCKS5 Proxy listening on %s", s.addr)
+	go s.acceptLoop(l, s.done, s.serveErr)
+	return nil
+}
+
+func (s *SOCKS5Server) ListenAndServe() error {
+	if err := s.Start(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	done := s.done
+	errCh := s.serveErr
+	s.mu.Unlock()
+
+	<-done
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
 	}
 }
 
+func (s *SOCKS5Server) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	l := s.listener
+	done := s.done
+	s.listener = nil
+	activeConns := make([]net.Conn, 0, len(s.conns))
+	for conn := range s.conns {
+		activeConns = append(activeConns, conn)
+	}
+	if l == nil && len(activeConns) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
+	if l != nil {
+		if err := l.Close(); err != nil {
+			return err
+		}
+	}
+	for _, conn := range activeConns {
+		_ = conn.Close()
+	}
+
+	if done == nil {
+		return nil
+	}
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	waitCh := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *SOCKS5Server) acceptLoop(l net.Listener, done chan struct{}, errCh chan error) {
+	defer close(done)
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			s.mu.Lock()
+			currentListener := s.listener
+			s.mu.Unlock()
+
+			if currentListener == nil {
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				log.Printf("Accept temporary failure: %v", err)
+				continue
+			}
+			select {
+			case errCh <- err:
+			default:
+			}
+			return
+		}
+		if !s.trackConn(conn) {
+			_ = conn.Close()
+			continue
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleConnection(conn)
+		}()
+	}
+}
+
+func (s *SOCKS5Server) trackConn(conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return false
+	}
+	s.conns[conn] = struct{}{}
+	return true
+}
+
+func (s *SOCKS5Server) untrackConn(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.conns, conn)
+	s.mu.Unlock()
+}
+
 func (s *SOCKS5Server) handleConnection(conn net.Conn) {
+	defer s.untrackConn(conn)
 	defer conn.Close()
 
 	// 1. Negotiation
@@ -82,7 +212,7 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 		// ...
 		return
 	}
-	
+
 	var targetAddr string
 	switch buf[3] {
 	case atypIPv4:
@@ -121,7 +251,7 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 
 	// 3. Connect to Remote via HTTP Tunnel
 	// log.Printf("Connecting to %s", target)
-	
+
 	// Delegate to Transport
 	// Transport needs to return an error or nil.
 	// We need to send SOCKS reply *before* piping data?
@@ -130,17 +260,17 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 	// - Server attempts connection
 	// - Server sends Reply (Success/Fail)
 	// - Then transfer begins.
-	
+
 	// BUT, our Transport establishes the tunnel asynchronously?
 	// Actually, the server side dials the target.
 	// If server side fails to dial, it writes nothing and closes?
 	// OR we assume success and start streaming?
 	// If server fails, the stream closes.
-	
+
 	// Let's send Success reply immediately then start tunnel.
 	// This makes "connection refused" handling harder (user sees connection closed instead of SOCKS error),
 	// but is faster/simpler for this tunnel Architecture.
-	
+
 	// Send Reply: Success
 	// [VER, REP(0x00), RSV, ATYP, BND.ADDR, BND.PORT]
 	// We just verify success.

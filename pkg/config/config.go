@@ -6,13 +6,44 @@ import (
 )
 
 type Config struct {
-	Addresses []string `json:"addressess"` // Note: keeping typo from user req for consistency with their json, or should I fix? I'll stick to user's "addressess" key but maybe clean field name.
+	Addresses []string `json:"addressess"`
 	Host      string   `json:"host"`
 	TLS       bool     `json:"tls"`
 	SNI       string   `json:"sni"`
 	Port      int      `json:"port"`
 	ProxyPort int      `json:"proxy_port"`
 	Secret    string   `json:"secret"`
+}
+
+func (c *Config) UnmarshalJSON(data []byte) error {
+	aux := struct {
+		AddressesLegacy []string `json:"addressess"`
+		AddressesNew    []string `json:"addresses"`
+		Host            string   `json:"host"`
+		TLS             bool     `json:"tls"`
+		SNI             string   `json:"sni"`
+		Port            int      `json:"port"`
+		ProxyPort       int      `json:"proxy_port"`
+		Secret          string   `json:"secret"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	c.Host = aux.Host
+	c.TLS = aux.TLS
+	c.SNI = aux.SNI
+	c.Port = aux.Port
+	c.ProxyPort = aux.ProxyPort
+	c.Secret = aux.Secret
+	if len(aux.AddressesLegacy) > 0 {
+		c.Addresses = aux.AddressesLegacy
+	} else if len(aux.AddressesNew) > 0 {
+		c.Addresses = aux.AddressesNew
+	} else {
+		c.Addresses = nil
+	}
+	return nil
 }
 
 func LoadConfig(path string) (*Config, error) {
