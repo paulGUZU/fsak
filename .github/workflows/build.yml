@@ -3,6 +3,7 @@ name: Build and Release FSAK
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -11,14 +12,34 @@ permissions:
   contents: write
 
 jobs:
-
-  build:
-    name: Build
+  # ==========================================
+  # CLI Builds (Client & Server) - All Platforms
+  # ==========================================
+  build-cli:
+    name: Build CLI (${{ matrix.goos }}-${{ matrix.goarch }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        goos: [linux, windows, darwin]
-        goarch: [amd64, arm64]
+        include:
+          # Linux
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          # Windows
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          # macOS
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          # FreeBSD
+          - goos: freebsd
+            goarch: amd64
 
     steps:
     - name: Checkout code
@@ -33,53 +54,237 @@ jobs:
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
       run: |
         OUTPUT_NAME="fsak-client-${{ matrix.goos }}-${{ matrix.goarch }}"
         if [ "${{ matrix.goos }}" = "windows" ]; then
           OUTPUT_NAME="${OUTPUT_NAME}.exe"
         fi
-        go build -v -o build/${OUTPUT_NAME} ./cmd/client
+        go build -ldflags="-s -w" -v -o build/${OUTPUT_NAME} ./cmd/client
 
     - name: Build Server
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
       run: |
         OUTPUT_NAME="fsak-server-${{ matrix.goos }}-${{ matrix.goarch }}"
         if [ "${{ matrix.goos }}" = "windows" ]; then
           OUTPUT_NAME="${OUTPUT_NAME}.exe"
         fi
-        go build -v -o build/${OUTPUT_NAME} ./cmd/server
+        go build -ldflags="-s -w" -v -o build/${OUTPUT_NAME} ./cmd/server
 
-    - name: Upload Artifacts
+    - name: Upload CLI Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: fsak-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+        name: fsak-cli-${{ matrix.goos }}-${{ matrix.goarch }}
         path: build/*
+        if-no-files-found: error
 
+  # ==========================================
+  # GUI Build - Linux
+  # ==========================================
+  build-gui-linux:
+    name: Build GUI (Linux)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgl1-mesa-dev xorg-dev gcc
+
+    - name: Build GUI (AMD64)
+      if: matrix.arch == 'amd64'
+      env:
+        GOOS: linux
+        GOARCH: amd64
+        CGO_ENABLED: 1
+      run: |
+        go build -ldflags="-s -w" -v -o build/fsak-gui-linux-amd64 ./cmd/gui
+
+    - name: Build GUI (ARM64)
+      if: matrix.arch == 'arm64'
+      env:
+        GOOS: linux
+        GOARCH: arm64
+        CGO_ENABLED: 1
+        CC: aarch64-linux-gnu-gcc
+      run: |
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        go build -ldflags="-s -w" -v -o build/fsak-gui-linux-arm64 ./cmd/gui
+
+    - name: Upload GUI Linux Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: fsak-gui-linux-${{ matrix.arch }}
+        path: build/*
+        if-no-files-found: error
+
+  # ==========================================
+  # GUI Build - macOS
+  # ==========================================
+  build-gui-macos:
+    name: Build GUI (macOS)
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Build GUI
+      env:
+        GOOS: darwin
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 1
+      run: |
+        OUTPUT_NAME="fsak-gui-darwin-${{ matrix.arch }}"
+        go build -ldflags="-s -w" -v -o build/${OUTPUT_NAME} ./cmd/gui
+
+    - name: Create App Bundle (AMD64 only - can run on both)
+      if: matrix.arch == 'amd64'
+      run: |
+        mkdir -p build/FSAK.app/Contents/MacOS
+        mkdir -p build/FSAK.app/Contents/Resources
+        cp build/fsak-gui-darwin-amd64 build/FSAK.app/Contents/MacOS/fsak-gui
+        
+        # Create Info.plist
+        cat > build/FSAK.app/Contents/Info.plist << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleExecutable</key>
+            <string>fsak-gui</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.paulguzu.fsak.gui</string>
+            <key>CFBundleName</key>
+            <string>FSAK</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.14</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+        </dict>
+        </plist>
+        EOF
+        
+        # Create zip of app bundle
+        cd build && zip -r fsak-gui-darwin-amd64-app.zip FSAK.app
+
+    - name: Upload GUI macOS Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: fsak-gui-darwin-${{ matrix.arch }}
+        path: build/*
+        if-no-files-found: error
+
+  # ==========================================
+  # GUI Build - Windows
+  # ==========================================
+  build-gui-windows:
+    name: Build GUI (Windows)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Build GUI
+      env:
+        GOOS: windows
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 1
+      run: |
+        go build -ldflags="-s -w" -v -o build/fsak-gui-windows-${{ matrix.arch }}.exe ./cmd/gui
+
+    - name: Upload GUI Windows Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: fsak-gui-windows-${{ matrix.arch }}
+        path: build/*
+        if-no-files-found: error
+
+  # ==========================================
+  # Release
+  # ==========================================
   release:
-    name: Release
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Create Release
+    needs: [build-cli, build-gui-linux, build-gui-macos, build-gui-windows]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
-      - name: Download Artifacts
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: fsak-binaries-*
+          pattern: fsak-*
           merge-multiple: true
 
-      - name: Create Release
+      - name: List Artifacts
+        run: ls -la artifacts/
+
+      - name: Create Release (Tagged)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
         with:
           files: artifacts/*
-          # Use a unique tag for each build to create a new release
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+      - name: Create Release (Main Branch)
+        if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
           body: |
             Automated release from build ${{ github.run_number }}.
             Commit: ${{ github.sha }}
+            
+            ## Binaries
+            
+            ### CLI Tools
+            - `fsak-client-*` - Client binary for various platforms
+            - `fsak-server-*` - Server binary for various platforms
+            
+            ### GUI Application
+            - `fsak-gui-*` - GUI application for various platforms
+            - `fsak-gui-darwin-amd64-app.zip` - macOS App Bundle (universal)
           draft: false
-          prerelease: false
+          prerelease: true
