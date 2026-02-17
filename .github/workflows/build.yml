@@ -82,15 +82,12 @@ jobs:
         if-no-files-found: error
 
   # ==========================================
-  # GUI Build - Linux
+  # GUI Build - Linux (AMD64 only)
+  # Note: ARM64 GUI requires ARM64 runner or complex cross-compilation
   # ==========================================
   build-gui-linux:
-    name: Build GUI (Linux)
+    name: Build GUI (Linux AMD64)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
 
     steps:
     - name: Checkout code
@@ -106,8 +103,7 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libgl1-mesa-dev xorg-dev gcc
 
-    - name: Build GUI (AMD64)
-      if: matrix.arch == 'amd64'
+    - name: Build GUI
       env:
         GOOS: linux
         GOARCH: amd64
@@ -115,21 +111,10 @@ jobs:
       run: |
         go build -ldflags="-s -w" -v -o build/fsak-gui-linux-amd64 ./cmd/gui
 
-    - name: Build GUI (ARM64)
-      if: matrix.arch == 'arm64'
-      env:
-        GOOS: linux
-        GOARCH: arm64
-        CGO_ENABLED: 1
-        CC: aarch64-linux-gnu-gcc
-      run: |
-        sudo apt-get install -y gcc-aarch64-linux-gnu
-        go build -ldflags="-s -w" -v -o build/fsak-gui-linux-arm64 ./cmd/gui
-
     - name: Upload GUI Linux Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: fsak-gui-linux-${{ matrix.arch }}
+        name: fsak-gui-linux-amd64
         path: build/*
         if-no-files-found: error
 
@@ -162,7 +147,7 @@ jobs:
         OUTPUT_NAME="fsak-gui-darwin-${{ matrix.arch }}"
         go build -ldflags="-s -w" -v -o build/${OUTPUT_NAME} ./cmd/gui
 
-    - name: Create App Bundle (AMD64 only - can run on both)
+    - name: Create App Bundle (AMD64 only - runs on both via Rosetta)
       if: matrix.arch == 'amd64'
       run: |
         mkdir -p build/FSAK.app/Contents/MacOS
@@ -204,15 +189,12 @@ jobs:
         if-no-files-found: error
 
   # ==========================================
-  # GUI Build - Windows
+  # GUI Build - Windows (AMD64 only)
+  # Note: ARM64 GUI build has CGO/TUN2Socks compatibility issues
   # ==========================================
   build-gui-windows:
-    name: Build GUI (Windows)
+    name: Build GUI (Windows AMD64)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
 
     steps:
     - name: Checkout code
@@ -226,15 +208,15 @@ jobs:
     - name: Build GUI
       env:
         GOOS: windows
-        GOARCH: ${{ matrix.arch }}
+        GOARCH: amd64
         CGO_ENABLED: 1
       run: |
-        go build -ldflags="-s -w" -v -o build/fsak-gui-windows-${{ matrix.arch }}.exe ./cmd/gui
+        go build -ldflags="-s -w" -v -o build/fsak-gui-windows-amd64.exe ./cmd/gui
 
     - name: Upload GUI Windows Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: fsak-gui-windows-${{ matrix.arch }}
+        name: fsak-gui-windows-amd64
         path: build/*
         if-no-files-found: error
 

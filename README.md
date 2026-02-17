@@ -25,12 +25,16 @@ Pre-built binaries are available from [GitHub Releases](../../releases).
 | Platform | CLI Client | CLI Server | GUI App |
 |----------|------------|------------|---------|
 | Linux (amd64) | ✅ | ✅ | ✅ |
-| Linux (arm64) | ✅ | ✅ | ✅ |
+| Linux (arm64) | ✅ | ✅ | ❌¹ |
 | Windows (amd64) | ✅ | ✅ | ✅ |
-| Windows (arm64) | ✅ | ✅ | ✅ |
+| Windows (arm64) | ✅ | ✅ | ❌² |
 | macOS (amd64) | ✅ | ✅ | ✅ |
 | macOS (arm64) | ✅ | ✅ | ✅ |
 | FreeBSD (amd64) | ✅ | ✅ | ❌ |
+
+> **Notes:**
+> ¹ Linux ARM64 GUI requires complex cross-compilation libraries (not available in CI).
+> ² Windows ARM64 GUI has CGO/TUN2Socks compatibility issues.
 
 ## Installation
 
